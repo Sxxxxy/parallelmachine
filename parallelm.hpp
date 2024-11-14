@@ -26,18 +26,20 @@ public:
     std::unordered_map<std::string,double> root_info;
     int neighborhood_size = 0;
     double alpha = 0.0;
-
+    double beta = 0.6;
     std::unordered_map<int,int> best_sol;  //工件j分配到机器i上
     double best_obj = 1e20;
 
     std::unordered_set<std::string> fixed_vars;
     int Timelimit = 1000;
     int Threads = 1;
-    double explore_time = 40;
+    double explore_time = 20; //40
 
     std::string log_file;
     std::shared_ptr<OPTVConstr> obj_constr = nullptr;
-    ParallelM(const std::string& log_file_,double ratio = 0.5,int time_limit_ = 1000,int threads_ = 1)
+    std::shared_ptr<OPTVConstr> lb_constr = nullptr;
+    int lb_neighborhood_size = 0;
+    ParallelM(const std::string& log_file_,double ratio = 0.6,int time_limit_ = 1000,int threads_ = 1)
     {
         env = std::make_shared<OPTVEnv>(log_file_);
         model = std::make_shared<OPTVModel>(*env);
@@ -132,6 +134,7 @@ public:
     void createmodel()
     {
         neighborhood_size = int(alpha * n);
+        lb_neighborhood_size = int(beta * n);
         int bigM = 0;
         for (int j = 0; j < n; ++j)
         {
@@ -236,8 +239,9 @@ public:
         return flag;
     }
 
-    void solve()
+    bool solve()
     {
+        bool flag = false;
         model->Optimize();
         if (model->Get(OPTVIntAttr::SOL_COUNT) > 0)
         {
@@ -256,20 +260,17 @@ public:
                     }
                 }
             }
-            best_obj = model->Get(OPTVDblAttr::OBJ_VAL);
-            if (best_obj < 1e20)
+            auto tmp_obj = model->Get(OPTVDblAttr::OBJ_VAL);
+            if (tmp_obj < best_obj)
             {
+                best_obj = tmp_obj;
                 std::ofstream outfile(log_file,std::ios::app);
                 outfile <<TIMER::ClickMs()<<","<< best_obj << std::endl;
                 outfile.close();
-                if (obj_constr != nullptr)
-                {
-                    model->Remove(*obj_constr);
-                }
-                obj_constr = std::make_shared<OPTVConstr>(model->AddConstr(*C_max, -OPTV_INF,best_obj-1,"ObjConstr"));
-                model->Update();
+                flag = true;
             }
         }
+        return flag;
     }
 
     void getinitsol()
@@ -501,6 +502,67 @@ public:
         }
     }
 
+    void addlocalbranching()
+    {
+        OPTVLinExpr equal0_expr;
+        OPTVLinExpr equal1_expr;
+        int num_one = 0;
+        for (auto& tmp_var_p:y_ji)
+        {
+            auto& var = tmp_var_p.second;
+            int value = 0;
+            auto [tmp_job,tmp_machine] = extractnum(tmp_var_p.first);
+            if (best_sol[tmp_job] == tmp_machine)
+            {
+                value = 1;
+            }
+            if (std::abs(value) < 1e-3)
+            {
+                equal0_expr += (*var);
+            }
+            else if (std::abs(value-1) < 1e-3)
+            {
+                equal1_expr += (*var);
+                num_one++;
+            }
+        }
+        if (lb_constr != nullptr)
+        {
+            model->Remove(*lb_constr);
+        }
+        lb_constr = std::make_shared<OPTVConstr>(model->AddConstr(equal0_expr - equal1_expr,-OPTV_INF,lb_neighborhood_size-num_one,"LBConstr"));
+        model->Update();
+    }
+
+    void addobjcut()
+    {
+        if (obj_constr != nullptr)
+        {
+            model->Remove(*obj_constr);
+        }
+        obj_constr = std::make_shared<OPTVConstr>(model->AddConstr(*C_max, -OPTV_INF,best_obj-1,"ObjConstr"));
+        model->Update();
+    }
+
+    void deflocalbranching()
+    {
+        if (lb_constr != nullptr)
+        {
+            model->Remove(*lb_constr);
+            model->Update();
+        }
+        lb_constr = nullptr;
+    }
+
+    void defobjcut()
+    {
+        if (obj_constr != nullptr)
+        {
+            model->Remove(*obj_constr);
+            model->Update();
+        }
+        obj_constr = nullptr;
+    }
 
     void end2endsolve(int time_limit,int threads)
     {
@@ -550,7 +612,6 @@ public:
         model->Update();
     }
 
-
     void run()
     {
         createmodel();
@@ -569,20 +630,38 @@ public:
         std::cout << "Initial solution found. "<<best_obj << std::endl;
         freevars();
         int iter = 0;
+        bool lb_flag = true;
         while (!TIMER::isStop())
         {
             iter++;
-//            getfixed();
-            getfixedall2();
-            fixvars();
-            checkfixed();
-            addThreads(Threads);
-            double tmp_time = std::min(explore_time,TIMER::GetRemainingTime());
-            addTimelimt(tmp_time);
-            warmstart();
-            solve();
+
+            if (lb_flag)
+            {
+                addlocalbranching();
+                addThreads(Threads);
+                double tmp_time = std::min(explore_time,TIMER::GetRemainingTime());
+                addTimelimt(tmp_time);
+                warmstart();
+                lb_flag = solve();
+                deflocalbranching();
+            }
+            else
+            {
+                getfixedall2();
+                fixvars();
+                checkfixed();
+                addobjcut();
+                addThreads(Threads);
+                double tmp_time = std::min(explore_time,TIMER::GetRemainingTime());
+                addTimelimt(tmp_time);
+                warmstart();
+                auto better = solve();
+                freevars();
+                lb_flag = better;
+                defobjcut();
+            }
+
             std::cout << "Iter : "<<iter<<" , Obj : "<<best_obj << std::endl;
-            freevars();
         }
     }
 };

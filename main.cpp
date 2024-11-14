@@ -4,7 +4,7 @@
 
 int main(int argc, char** argv)
 {
-    std::string path = "/home/daoio01/parallelmachineoridata/1020.txt";
+    std::string path = "/home/daoio01/parallelmachineoridata/1018.txt";
     std::string result_path = "/home/daoio01/parallelmachineres/999.txt";
     result_path = "/home/daoio01/test.txt";
     int Timelimit = 300;
